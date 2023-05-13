@@ -75,6 +75,7 @@ end
 #   * Filtered RK4
 #   * LSRK54
 #   * ETDRK4
+#   * IFRK4
 #   * Filtered ETDRK4
 #   * AB3
 #   * Filtered AB3
@@ -417,6 +418,47 @@ function ETDRK4TimeStepper(equation::Equation, dt, dev::Device=CPU())
   return ETDRK4TimeStepper(ζ, α, β, Γ, expLdt, exp½Ldt, sol₁, sol₂, N₁, N₂, N₃, N₄)
 end
 
+# --
+# IFRK4
+# --
+
+"""
+    struct IFRK4TimeStepper{T,TL} <: AbstractTimeStepper{T}
+
+A 4th-order integrating factor Runge-Kutta timestepper for time-stepping
+`∂u/∂t = L * u + N(u)`. The scheme treats the linear term `L` exact while for the
+nonlinear terms `N(u)` it uses a 4th-order Runge-Kutta scheme. That is,
+```julia
+uⁿ⁺¹ = exp(L * dt) * uⁿ + RK4(N(uⁿ))
+```
+This is different from ETDRK4 in that it doesn't use a polynomial approximation.
+"""
+struct IFRK4TimeStepper{T,TL} <: AbstractTimeStepper{T}
+  # IFDRK4 coefficents
+  expLdt  :: TL
+  exp½Ldt :: TL
+     sol₁ :: T
+     sol₂ :: T
+       N₁ :: T
+       N₂ :: T
+       N₃ :: T
+       N₄ :: T
+end
+
+"""
+    IFRK4TimeStepper(equation::Equation, dt, dev::Device=CPU())
+
+Construct a 4th-order integrating factor Runge-Kutta timestepper with timestep `dt`
+for `equation` on device `dev`.
+"""
+function IFRK4TimeStepper(equation::Equation, dt, dev::Device=CPU())
+  dt = fltype(equation.T)(dt) # ensure dt is correct type.
+  expLdt, exp½Ldt = getexpLs(dt, equation)
+  @devzeros typeof(dev) equation.T equation.dims sol₁ sol₂ N₁ N₂ N₃ N₄
+  
+  return IFRK4TimeStepper(expLdt, exp½Ldt, sol₁, sol₂, N₁, N₂, N₃, N₄)
+end
+
 """
     FilteredETDRK4TimeStepper{T,TL,Tf} <: AbstractTimeStepper{T}
 
@@ -497,6 +539,56 @@ end
 function stepforward!(sol, clock, ts::ETDRK4TimeStepper, equation, vars, params, grid)
   ETDRK4substeps!(sol, clock, ts, equation, vars, params, grid)
   ETDRK4update!(sol, ts.expLdt, ts.α, ts.β, ts.Γ, ts.N₁, ts.N₂, ts.N₃, ts.N₄)
+
+  clock.t += clock.dt
+  clock.step += 1
+
+  return nothing
+end
+
+function IFRK4update!(sol, expLdt, exp½Ldt, dt, N₁, N₂, N₃, N₄)
+  @. sol = expLdt * sol + (dt/6)*(expLdt * N₁
+                                  + 2*exp½Ldt * (N₂ + N₃)
+                                  + N₄)
+  return nothing
+end
+
+function IFRK4substep12!(sol₁, exp½Ldt, sol, dt, N)
+  @. sol₁ = exp½Ldt * (sol + (dt/2) * N)
+
+  return nothing
+end
+
+function IFRK4substep3!(sol₁, expLdt, exp½Ldt, sol, dt, N)
+  @. sol₁ = expLdt * sol + dt * exp½Ldt * N
+
+  return nothing
+end
+
+function IFRK4substeps!(sol, clock, ts, equation, vars, params, grid)
+  # Substep 1
+  equation.calcN!(ts.N₁, sol, clock.t, clock, vars, params, grid)
+  IFRK4substep12!(ts.sol₁, ts.exp½Ldt, sol, clock.dt, ts.N₁)
+
+  # Substep 2
+  t2 = clock.t + clock.dt/2
+  equation.calcN!(ts.N₂, ts.sol₁, t2, clock, vars, params, grid)
+  IFRK4substep12!(ts.sol₂, ts.exp½Ldt, sol, clock.dt, ts.N₂)
+
+  # Substep 3
+  equation.calcN!(ts.N₃, ts.sol₂, t2, clock, vars, params, grid)
+  IFRK4substep3!(ts.sol₂, ts.expLdt, ts.exp½Ldt, sol, clock.dt, ts.N₃)
+
+  # Substep 4
+  t3 = clock.t + clock.dt
+  equation.calcN!(ts.N₄, ts.sol₂, t3, clock, vars, params, grid)
+
+  return nothing
+end
+
+function stepforward!(sol, clock, ts::IFRK4TimeStepper, equation, vars, params, grid)
+  IFRK4substeps!(sol, clock, ts, equation, vars, params, grid)
+  IFRK4update!(sol, ts.expLdt, ts.exp½Ldt, clock.dt, ts.N₁, ts.N₂, ts.N₃, ts.N₄)
 
   clock.t += clock.dt
   clock.step += 1
@@ -682,8 +774,8 @@ See also: [`stepforward!`](@ref)
 """
 step_until!(prob, stop_time) = step_until!(prob, prob.timestepper, stop_time)
 
-step_until!(prob, ::Union{ETDRK4TimeStepper, FilteredETDRK4TimeStepper}, stop_time) =
-  error("step_until! requires fully explicit time stepper; does not work with ETDRK4")
+step_until!(prob, ::Union{ETDRK4TimeStepper, IFRK4TimeStepper, FilteredETDRK4TimeStepper}, stop_time) =
+  error("step_until! requires fully explicit time stepper; does not work with ETDRK4 or IFRK4")
 
 function step_until!(prob, timestepper, stop_time)
   # Throw an error if stop_time is not greater than the current problem time

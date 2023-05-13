@@ -53,6 +53,7 @@ export
   FilteredRK4TimeStepper,
   LSRK54TimeStepper,
   ETDRK4TimeStepper,
+  IFRK4TimeStepper,
   FilteredETDRK4TimeStepper,
   AB3TimeStepper,
   FilteredAB3TimeStepper,

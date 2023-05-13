@@ -28,6 +28,7 @@ const steppers = [
   "RK4",
   "LSRK54",
   "ETDRK4",
+  "IFRK4",
   "AB3",
   "FilteredForwardEuler",
   "FilteredRK4",
